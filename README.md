@@ -6,6 +6,7 @@ A simple banking API built using **FastAPI** and **CSV logging**.
 - Deposit & Withdraw endpoints
 - Check balance
 - CSV-based transaction history logging
+- Keyword and date filters
 - RESTful API with Swagger UI
 
 ## 🚀 Run Locally
