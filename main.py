@@ -1,14 +1,10 @@
 #main.py
 
+# main.py
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from datetime import datetime
-import csv
-import os
-
-app = FastAPI()
-
-# ------------ Core Classes ------------
+from helpers import ensure_csv_exists, log_transaction, read_transactions, write_transactions, search_transactions
 
 class BankAccount:
     def __init__(self, account_holder, initial_balance=0):
@@ -16,33 +12,25 @@ class BankAccount:
         self.balance = initial_balance
         self.log_file = f"{account_holder}_transactions.csv"
 
-        # Create CSV with headers only if it doesn't exist
-        if not os.path.exists(self.log_file):
-            with open(self.log_file, mode='w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow(["Date", "Action", "Amount", "Balance"])
-
-    def log_transaction(self, action, amount):
-        with open(self.log_file, mode='a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                action,
-                amount,
-                self.balance
-            ])
+        ensure_csv_exists(self.log_file)
 
     def deposit(self, amount):
         self.balance += amount
-        self.log_transaction("Deposit", amount)
+        log_transaction(self.log_file, "Deposit", amount, self.balance)
         return f"Added ${amount}. New balance: ${self.balance}"
 
     def withdraw(self, amount):
         if amount > self.balance:
-            raise ValueError("Not enough money in account!")
+            raise ValueError("Insufficient funds!")
         self.balance -= amount
-        self.log_transaction("Withdraw", amount)
+        log_transaction(self.log_file, "Withdraw", amount, self.balance)
         return f"Withdrew ${amount}. New balance: ${self.balance}"
+
+    def add_interest(self):
+        interest = self.balance * 0.05
+        self.balance += interest
+        log_transaction(self.log_file, "Interest", interest, self.balance)
+        return f"Added ${interest:.2f} interest! New balance: ${self.balance}"
 
     def get_balance(self):
         return self.balance
@@ -51,60 +39,19 @@ class BankAccount:
     def is_overdrawn(self):
         return self.balance < 0
 
-
-class SavingsAccount(BankAccount):
-    def add_interest(self):
-        interest = self.balance * 0.05
-        self.balance += interest
-        self.log_transaction("Interest", interest)
-        return f"Added ${interest:.2f} interest! New balance: ${self.balance}"
-
-# ------------ Use a global account for now ------------
-
-account = SavingsAccount("Sahiti", 1000)
-
-# ------------ Pydantic Model ------------
+app = FastAPI()
+account = BankAccount("Sahiti", 1000)
 
 class Transaction(BaseModel):
     amount: float
 
+class UpdateTransaction(BaseModel):
+    index: int
+    action: str
+    amount: float
 
-def search_transactions(owner, keyword=None, date_from=None, date_to=None):
-        results=[]
-        file_path = f"{owner}_transactions.csv"
-
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="Transaction file not found.")
-        
-        from datetime import datetime
-        
-        try:
-            if date_from:
-                date_from = datetime.strptime(date_from, "%Y-%m-%d")
-            if date_to:
-                date_to=datetime.strptime(date_to, "%Y-%m-%d")
-        except ValueError:
-            raise HTTPException(status_code=400, detail="Invalid data format. Use YYYY-MM-DD.")
-        print("parsing date_from:", date_from)
-        
-        with open(file_path,mode='r')as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                row_date = datetime.strptime(row['Date'],"%Y-%m-%d %H:%M:%S" )
-
-                if keyword and keyword.lower() not in row["Action"].lower():
-                    continue
-                if date_from and row_date< date_from:
-                    continue
-                if date_to and row_date< date_to:
-                    continue
-
-                
-                results.append(row)
-        
-        return results
-
-# ------------ API Routes ------------
+class DeleteTransaction(BaseModel):
+    index: int
 
 @app.get("/balance")
 def get_balance():
@@ -131,19 +78,30 @@ def apply_interest():
 
 @app.get("/transactions")
 def get_transactions():
-    try:
-        with open(account.log_file, mode='r') as f:
-            reader = csv.DictReader(f)
-            return list(reader)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="Transaction file not found.")
-    
+    return read_transactions(account.log_file)
+
 @app.get("/search")
-def search(keyword: str=None, date_from: str=None, date_to:str=None):
-    return search_transactions("Sahiti",keyword,date_from,date_to)
+def search(keyword: str = None, date_from: str = None, date_to: str = None):
+    return search_transactions(account.log_file, keyword, date_from, date_to)
 
-@app.get("/debug-all")
-def debug_all():
-    with open(account.log_file, mode='r') as f:
-        return list(csv.DictReader(f))
+@app.put("/update")
+def update_transaction(update: UpdateTransaction):
+    transactions = read_transactions(account.log_file)
+    if update.index < 0 or update.index >= len(transactions):
+        raise HTTPException(status_code=404, detail="Transaction index out of range.")
 
+    transactions[update.index]["Action"] = update.action
+    transactions[update.index]["Amount"] = str(update.amount)
+    # Optionally, recalculate balance logic here if needed.
+    write_transactions(account.log_file, transactions)
+    return {"message": f"Transaction at index {update.index} updated."}
+
+@app.delete("/delete")
+def delete_transaction(delete: DeleteTransaction):
+    transactions = read_transactions(account.log_file)
+    if delete.index < 0 or delete.index >= len(transactions):
+        raise HTTPException(status_code=404, detail="Transaction index out of range.")
+
+    transactions.pop(delete.index)
+    write_transactions(account.log_file, transactions)
+    return {"message": f"Transaction at index {delete.index} deleted."}
